@@ -1022,22 +1022,67 @@ async function sendInfoCardToTopic(env, u, tgUser, tid, date) {
 }
 
 // --- 13. 未读通知（聚合话题） ---
+
+// 获取全局唯一话题（未读/黑名单），并发安全。
+// 裸的 "读配置→为空则创建" 会重复建话题：CACHE 每 isolate 一份且默认有 60s TTL，
+// isolate A 建完写入后，isolate B 仍读到空值又建一个，群里就堆出 N 个同名话题。
+// 这里复用用户话题那套 D1 条件更新抢锁：只有 changes===1 的那个 isolate 真正创建，
+// 其余轮询等待结果。锁值存时间戳，超过 TOPIC_LOCK_STALE_MS 视为过期可抢，避免死锁。
+async function ensureSharedTopic(env, cfgKey, topicName) {
+  // 必须 fresh 直读：缓存里的空值正是重复创建的根源
+  let tid = await getCfg(cfgKey, env, true);
+  if (tid) return tid;
+
+  const lockKey = `topiclock:${cfgKey}`;
+  const now = Date.now();
+  const staleBefore = now - TOPIC_LOCK_STALE_MS;
+
+  // 先确保锁行存在，否则下面的 UPDATE 影响 0 行，所有 isolate 都抢不到锁
+  await tryRun(env, "INSERT OR IGNORE INTO config (key, value) VALUES (?, '0')", [lockKey]);
+
+  // CAST 保证按数值比较：value 是 TEXT，字符串比较下 "999" > "1000"
+  const lockRes = await tryRun(
+    env,
+    "UPDATE config SET value=? WHERE key=? AND (value='0' OR CAST(value AS INTEGER) < ?)",
+    [now.toString(), lockKey, staleBefore]
+  );
+  const locked = (lockRes?.meta?.changes ?? lockRes?.changes ?? 0) === 1;
+
+  if (locked) {
+    try {
+      // 抢到锁后再确认一次：可能上一个持锁者刚建好
+      tid = await getCfg(cfgKey, env, true);
+      if (!tid) {
+        const t = await api(env.BOT_TOKEN, "createForumTopic", { chat_id: env.ADMIN_GROUP_ID, name: topicName });
+        tid = t.message_thread_id.toString();
+        await setCfg(cfgKey, tid, env);
+      }
+    } catch {
+      tid = "";
+    } finally {
+      // 无论成败都释放，失败时让下一次请求可以立即重试
+      await tryRun(env, "UPDATE config SET value='0' WHERE key=?", [lockKey]);
+    }
+    return tid;
+  }
+
+  // 没抢到锁：等持锁者创建完成
+  for (let i = 0; i < TOPIC_LOCK_POLL_MAX; i++) {
+    await sleep(Math.min(1500, TOPIC_LOCK_POLL_BASE_MS * Math.pow(2, i)) + Math.floor(Math.random() * 60));
+    tid = await getCfg(cfgKey, env, true);
+    if (tid) return tid;
+  }
+  return "";
+}
+
 async function handleInbox(env, msg, u, tid, uMeta) {
   const lk = `inbox:${u.user_id}`;
   if (CACHE.locks.has(lk)) return;
   CACHE.locks.add(lk);
   setTimeout(() => CACHE.locks.delete(lk), 3000);
 
-  let inboxId = await getCfg("unread_topic_id", env);
-  if (!inboxId) {
-    try {
-      const t = await api(env.BOT_TOKEN, "createForumTopic", { chat_id: env.ADMIN_GROUP_ID, name: "🔔 未读消息" });
-      inboxId = t.message_thread_id.toString();
-      await setCfg("unread_topic_id", inboxId, env);
-    } catch {
-      return;
-    }
-  }
+  const inboxId = await ensureSharedTopic(env, "unread_topic_id", "🔔 未读消息");
+  if (!inboxId) return;
 
   const gid = env.ADMIN_GROUP_ID.toString().replace(/^-100/, "");
   const preview = msg.text ? (msg.text.length > 20 ? msg.text.substring(0, 20) + "..." : msg.text) : "[媒体消息]";
@@ -1071,22 +1116,23 @@ async function handleInbox(env, msg, u, tid, uMeta) {
     });
     await updUser(u.user_id, { user_info: { last_notify: Date.now(), inbox_msg_id: nm.message_id } }, env);
   } catch (e) {
-    if (e.message && e.message.includes("thread")) await setCfg("unread_topic_id", "", env);
+    // 仅当话题确实不存在时才清空配置以触发重建。
+    // 原先对任何含 "thread" 的错误都清空，限流/权限等临时故障会导致
+    // "报错→清空→重建" 无限循环，正是话题堆积的另一个来源。
+    const m = (e && e.message) || "";
+    if (/thread not found|TOPIC_DELETED|message thread not found/i.test(m)) {
+      await setCfg("unread_topic_id", "", env);
+    } else {
+      console.error("Inbox Fail:", m);
+    }
   }
 }
 
 // --- 14. 黑名单/备份 ---
 async function manageBlacklist(env, u, tgUser, isBlocking) {
-  let bid = await getCfg("blocked_topic_id", env);
-  if (!bid && isBlocking) {
-    try {
-      const t = await api(env.BOT_TOKEN, "createForumTopic", { chat_id: env.ADMIN_GROUP_ID, name: "🚫 黑名单" });
-      bid = t.message_thread_id.toString();
-      await setCfg("blocked_topic_id", bid, env);
-    } catch {
-      return;
-    }
-  }
+  let bid = await getCfg("blocked_topic_id", env, true);
+  // 同未读话题：裸的 check-then-act 会并发重复创建
+  if (!bid && isBlocking) bid = await ensureSharedTopic(env, "blocked_topic_id", "🚫 黑名单");
   if (!bid) return;
 
   if (isBlocking) {
