@@ -210,9 +210,12 @@ const tryRun = async (env, query, args = []) => {
   }
 };
 
-async function getCfg(k, env) {
+// fresh=true 时跳过 CACHE 直读 D1。
+// CACHE 是模块级变量、每个 isolate 一份，setCfg 的失效只对本 isolate 生效；
+// 管理面板必须显示 D1 真实值，否则会渲染出别的 isolate 的过期状态。
+async function getCfg(k, env, fresh = false) {
   const now = Date.now();
-  if (CACHE.ts && now - CACHE.ts < CACHE.ttl && CACHE.data[k] !== undefined) return CACHE.data[k];
+  if (!fresh && CACHE.ts && now - CACHE.ts < CACHE.ttl && CACHE.data[k] !== undefined) return CACHE.data[k];
 
   const rows = await sql(env, "SELECT * FROM config", [], "all");
   if (rows?.results) {
@@ -659,7 +662,19 @@ async function handlePrivate(msg, env, ctx) {
   const qaOn = await getBool("enable_qa_verify", env);
 
   if (u.user_state !== "verified" && (verifyOn || qaOn)) {
-    if (u.user_state === "pending_verification" && text) return verifyAnswer(id, text, env);
+    if (u.user_state === "pending_verification" && text) {
+      // verifyAnswer 返回 false 表示输入是命令而非答案
+      const handled = await verifyAnswer(id, text, env);
+      if (handled) return;
+
+      // 命令兜底：重发当前问题让用户脱困
+      // 不走 sendStart —— 人机验证已通过，无需重做，仅刷新问答题目
+      return api(env.BOT_TOKEN, "sendMessage", {
+        chat_id: id,
+        text: "🔄 已为您重新发送验证问题：\n" + (await getCfg("verif_q", env)),
+        parse_mode: "HTML"
+      });
+    }
     return sendStart(id, msg, env);
   }
 
@@ -1235,13 +1250,28 @@ async function handleTokenSubmit(req, env, ctx) {
 }
 
 // QA 验证
+// 返回 true 表示该输入已按“答案”处理完毕；返回 false 表示应交由上层按命令处理
 async function verifyAnswer(id, ans, env) {
-  if (ans.trim() === (await getCfg("verif_a", env)).trim()) {
+  const input = ans.trim();
+
+  // 先比对答案：保证管理员把答案设成 "/xxx" 形式时仍可通过
+  if (input === (await getCfg("verif_a", env)).trim()) {
     await updUser(id, { user_state: "verified" }, env);
     await api(env.BOT_TOKEN, "sendMessage", { chat_id: id, text: "✅ 验证通过！\n请直接发送消息以联系管理员。" });
-  } else {
-    await api(env.BOT_TOKEN, "sendMessage", { chat_id: id, text: "❌ 错误" });
+    return true;
   }
+
+  // 不匹配且是命令：不判错，交上层处理
+  // 否则 /start 等会被当成错误答案，用户在管理员改题后无法自救
+  if (input.startsWith("/")) return false;
+
+  // 答错时回显当前题目（实时读配置，管理员改题后自动带出新题）
+  await api(env.BOT_TOKEN, "sendMessage", {
+    chat_id: id,
+    text: "❌ 答案错误，请重新回答：\n" + (await getCfg("verif_q", env)),
+    parse_mode: "HTML"
+  });
+  return true;
 }
 
 // --- 16. initData 验签 ---
@@ -1315,8 +1345,8 @@ function timingSafeEqualStr(a, b) {
 }
 
 // --- 17. 辅助函数 ---
-const getBool = async (k, e) => (await getCfg(k, e)) === "true";
-const getJsonCfg = async (k, e) => safeParse(await getCfg(k, e), []);
+const getBool = async (k, e, fresh = false) => (await getCfg(k, e, fresh)) === "true";
+const getJsonCfg = async (k, e, fresh = false) => safeParse(await getCfg(k, e, fresh), []);
 
 function escapeHTML(t) {
   return (t || "")
@@ -1326,6 +1356,26 @@ function escapeHTML(t) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// 面板内回显配置值：转义 + 截断。
+// 转义是必须的——面板 render 带 parse_mode:"HTML"，配置值含 < 会让 sendMessage 返回 400，
+// 被 handleAdminConfig 的 catch 吞掉，整个面板静默失灵。
+// 欢迎语可能是 {type,file_id,caption} 媒体 JSON，需还原成可读描述而非直接吐 JSON。
+function cfgPreview(raw, max = 300) {
+  let s = (raw ?? "").toString();
+  if (!s.trim()) return "<i>(未设置)</i>";
+
+  if (s.trim().startsWith("{")) {
+    const m = safeParse(s, null);
+    if (m && m.type) {
+      const label = { photo: "图片", video: "视频", animation: "GIF" }[m.type] || m.type;
+      s = `[${label}]` + (m.caption ? ` ${m.caption}` : "");
+    }
+  }
+
+  const clipped = s.length > max ? s.slice(0, max) + "…" : s;
+  return escapeHTML(clipped);
 }
 
 function safeRegexTest(pattern, text) {
@@ -1515,13 +1565,54 @@ async function handleEdit(msg, env) {
 }
 
 // --- 22. 面板（移除回执功能项） ---
+// 列表类配置的展示文案：标题、空列表提示、添加时的输入说明。
+// 面板原先直接显示内部键名（"列表: auth"、"请输入 auth 的新值"），对管理员无意义。
+const LIST_META = {
+  ar: {
+    title: "🤖 <b>自动回复</b>",
+    desc: "用户消息命中关键词时，Bot 自动回复对应内容。",
+    empty: "暂无规则。",
+    prompt:
+      "请输入自动回复规则，格式：\n<b>关键词===回复内容</b>\n\n" +
+      "例如：\n<code>价格===请联系人工客服</code>\n<code>营业时间===每天 9:00-21:00</code>\n\n" +
+      "• 关键词支持正则表达式\n• 每次添加一条\n(/cancel 取消)"
+  },
+  kw: {
+    title: "🚫 <b>屏蔽词</b>",
+    desc: "用户消息命中后不转发并计违规次数，达到阈值自动封禁。",
+    empty: "暂无屏蔽词。",
+    prompt:
+      "请输入要屏蔽的关键词：\n\n" +
+      "例如：\n<code>广告</code>\n<code>加微信.*</code>\n\n" +
+      "• 支持正则表达式\n• 每次添加一条\n(/cancel 取消)"
+  },
+  auth: {
+    title: "👮 <b>协管</b>",
+    desc:
+      "协管可在管理群屏蔽/解封用户，自身免验证、免限流。\n" +
+      "但<b>不能</b>进入本控制面板，也不能使用 /reset。",
+    empty: "暂无协管。",
+    prompt:
+      "请输入协管的 <b>Telegram 数字 ID</b>：\n\n" +
+      "例如：<code>123456789</code>\n\n" +
+      "• 必须是纯数字 ID，<b>不能填 @用户名</b>\n" +
+      "• 让对方给 @userinfobot 发条消息即可获取\n" +
+      "• 每次添加一个\n(/cancel 取消)"
+  }
+};
+
 async function handleAdminConfig(cid, mid, type, key, val, env) {
+  // mid 为空时走 sendMessage，此时不能带 message_id（非法参数）
   const render = (txt, kb) =>
     api(env.BOT_TOKEN, mid ? "editMessageText" : "sendMessage", {
       chat_id: cid,
-      message_id: mid,
+      ...(mid ? { message_id: mid } : {}),
       text: txt,
       parse_mode: "HTML",
+      // 配置值中的网址会被 TG 自动展开成预览卡片，撑爆面板布局
+      link_preview_options: { is_disabled: true },
+      // 兼容 Bot API < 7.0：旧版只认 disable_web_page_preview，新版忽略它
+      disable_web_page_preview: true,
       reply_markup: kb
     });
   const back = { text: "🔙 返回", callback_data: "config:menu" };
@@ -1532,22 +1623,33 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
         return render("⚙️ <b>控制面板</b>", {
           inline_keyboard: [
             [{ text: "📝 基础", callback_data: "config:menu:base" }, { text: "🤖 自动回复", callback_data: "config:menu:ar" }],
-            [{ text: "🚫 屏蔽词", callback_data: "config:menu:kw" }, { text: "🛠 过滤", callback_data: "config:menu:fl" }],
+            [{ text: "🚫 屏蔽词", callback_data: "config:menu:kw" }, { text: "🛠 转发设置", callback_data: "config:menu:fl" }],
             [{ text: "👮 协管", callback_data: "config:menu:auth" }, { text: "💾 备份/通知", callback_data: "config:menu:bak" }],
             [{ text: "🌙 营业状态", callback_data: "config:menu:busy" }]
           ]
         });
 
       if (key === "base") {
-        const mode = await getCfg("captcha_mode", env);
-        const captchaOn = await getBool("enable_verify", env);
-        const qaOn = await getBool("enable_qa_verify", env);
+        const mode = await getCfg("captcha_mode", env, true);
+        const captchaOn = await getBool("enable_verify", env, true);
+        const qaOn = await getBool("enable_qa_verify", env, true);
+        const welcome = await getCfg("welcome_msg", env, true);
+        const vq = await getCfg("verif_q", env, true);
+        const va = await getCfg("verif_a", env, true);
         let statusText = "❌ 已关闭";
         if (captchaOn) statusText = mode === "recaptcha" ? "Google" : "Cloudflare";
 
-        return render(`基础配置\n验证码模式: ${statusText}\n问题验证: ${qaOn ? "✅" : "❌"}`, {
+        const body =
+          `📝 <b>基础配置</b>\n\n` +
+          `验证码模式: ${statusText}\n` +
+          `问题验证: ${qaOn ? "✅ 开启" : "❌ 关闭"}\n\n` +
+          `💬 <b>欢迎语:</b>\n${cfgPreview(welcome)}\n\n` +
+          `❓ <b>问题:</b>\n${cfgPreview(vq)}\n\n` +
+          `🔑 <b>答案:</b> ${cfgPreview(va, 100)}`;
+
+        return render(body, {
           inline_keyboard: [
-            [{ text: "欢迎语", callback_data: "config:edit:welcome_msg" }, { text: "问题", callback_data: "config:edit:verif_q" }, { text: "答案", callback_data: "config:edit:verif_a" }],
+            [{ text: "💬 欢迎语", callback_data: "config:edit:welcome_msg" }, { text: "❓ 问题", callback_data: "config:edit:verif_q" }, { text: "🔑 答案", callback_data: "config:edit:verif_a" }],
             [{ text: `验证码模式: ${statusText} (点击切换)`, callback_data: `config:rotate_mode` }],
             [{ text: `问题验证: ${qaOn ? "✅ 开启" : "❌ 关闭"}`, callback_data: `config:toggle:enable_qa_verify:${!qaOn}` }],
             [back]
@@ -1555,13 +1657,13 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
         });
       }
 
-      if (key === "fl") return render("🛠 <b>过滤设置</b> (点击切换)", await getFilterKB(env));
-      if (["ar", "kw", "auth"].includes(key)) return render(`列表: ${key}`, await getListKB(key, env));
+      if (key === "fl") return render("🛠 <b>转发设置</b> (点击切换)\n✅ 接收并转发给管理员　❌ 拦截不转发", await getFilterKB(env));
+      if (["ar", "kw", "auth"].includes(key)) return render(await listTitle(key, env), await getListKB(key, env));
 
       if (key === "bak") {
-        const bid = await getCfg("backup_group_id", env),
-          uid = await getCfg("unread_topic_id", env),
-          blk = await getCfg("blocked_topic_id", env);
+        const bid = await getCfg("backup_group_id", env, true),
+          uid = await getCfg("unread_topic_id", env, true),
+          blk = await getCfg("blocked_topic_id", env, true);
         return render(`💾 <b>备份与通知</b>\n备份群: ${bid || "无"}\n未读话题: ${uid ? `✅ (${uid})` : "⏳"}\n黑名单话题: ${blk ? `✅ (${blk})` : "⏳"}`, {
           inline_keyboard: [
             [{ text: "设备份群", callback_data: "config:edit:backup_group_id" }, { text: "清备份", callback_data: "config:cl:backup_group_id" }],
@@ -1572,8 +1674,8 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
       }
 
       if (key === "busy") {
-        const on = await getBool("busy_mode", env),
-          msgText = await getCfg("busy_msg", env);
+        const on = await getBool("busy_mode", env, true),
+          msgText = await getCfg("busy_msg", env, true);
         return render(`🌙 <b>营业状态</b>\n当前: ${on ? "🔴 休息中" : "🟢 营业中"}\n回复语: ${escapeHTML(msgText)}`, {
           inline_keyboard: [
             [{ text: `切换为 ${on ? "🟢 营业" : "🔴 休息"}`, callback_data: `config:toggle:busy_mode:${!on}` }],
@@ -1590,7 +1692,7 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
         ? handleAdminConfig(cid, mid, "menu", "busy", null, env)
         : key === "enable_qa_verify"
           ? handleAdminConfig(cid, mid, "menu", "base", null, env)
-          : render("🛠 <b>过滤设置</b>", await getFilterKB(env));
+          : render("🛠 <b>转发设置</b> (点击切换)\n✅ 接收并转发给管理员　❌ 拦截不转发", await getFilterKB(env));
     }
 
     if (type === "cl") {
@@ -1607,40 +1709,52 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
 
     if (type === "del") {
       const realK = key === "kw" ? "block_keywords" : key === "auth" ? "authorized_admins" : "keyword_responses";
-      let l = await getJsonCfg(realK, env);
+      // 必须读 D1 真实值：基于过期缓存过滤后写回会丢掉其它 isolate 刚添加的条目
+      let l = await getJsonCfg(realK, env, true);
       l = (Array.isArray(l) ? l : []).filter(i => (i.id || i).toString() !== val);
       await setCfg(realK, JSON.stringify(l), env);
-      return render(`列表: ${key}`, await getListKB(key, env));
+      return render(await listTitle(key, env), await getListKB(key, env));
     }
 
     if (type === "edit" || type === "add") {
       await setCfg(`admin_state:${cid}`, JSON.stringify({ action: "input", key: key + (type === "add" ? "_add" : "") }), env);
 
-      let promptText = `请输入 ${key} 的值 (/cancel 取消):`;
-      if (key === "ar" && type === "add") promptText = `请输入自动回复规则，格式：\n<b>关键词===回复内容</b>\n\n例如：价格===请联系人工客服\n(/cancel 取消)`;
+      let promptText = `请输入 ${key} 的新值 (/cancel 取消):`;
+      if (type === "add" && LIST_META[key]) promptText = LIST_META[key].prompt;
       if (key === "welcome_msg") promptText = `请发送新的欢迎语 (/cancel 取消):\n\n• 支持 <b>文字</b> 或 <b>图片/视频/GIF</b>\n• 支持占位符: {name}\n• 直接发送媒体即可`;
-      return api(env.BOT_TOKEN, "editMessageText", { chat_id: cid, message_id: mid, text: promptText, parse_mode: "HTML" });
+
+      // edit 回显当前值，避免盲改覆盖；add 是新增条目，无当前值可显示
+      if (type === "edit") {
+        promptText += `\n\n<b>当前值:</b>\n${cfgPreview(await getCfg(key, env, true))}`;
+      }
+      return api(env.BOT_TOKEN, "editMessageText", {
+        chat_id: cid,
+        message_id: mid,
+        text: promptText,
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        disable_web_page_preview: true
+      });
     }
 
     if (type === "rotate_mode") {
-      const currentMode = await getCfg("captcha_mode", env);
-      const isEnabled = await getBool("enable_verify", env);
+      const currentMode = await getCfg("captcha_mode", env, true);
+      const isEnabled = await getBool("enable_verify", env, true);
       let nextMode = "turnstile",
-        nextEnable = "true",
-        toast = "已切换: Cloudflare";
+        nextEnable = "true";
       if (isEnabled) {
         if (currentMode === "turnstile") {
           nextMode = "recaptcha";
-          toast = "已切换: Google";
         } else {
           nextEnable = "false";
           nextMode = currentMode;
-          toast = "验证已关闭";
         }
       }
       await setCfg("captcha_mode", nextMode, env);
       await setCfg("enable_verify", nextEnable, env);
-      return render(`基础配置已更新\n${toast}`, { inline_keyboard: [[back]] });
+      // 直接重绘 base 菜单：原先只渲染提示页，用户须"返回→再进"才看到新状态，
+      // 而那次重进可能落在缓存未失效的另一个 isolate 上，于是显示旧值
+      return handleAdminConfig(cid, mid, "menu", "base", null, env);
     }
   } catch (e) {
     console.error("handleAdminConfig error:", e);
@@ -1648,8 +1762,9 @@ async function handleAdminConfig(cid, mid, type, key, val, env) {
 }
 
 async function getFilterKB(env) {
-  const s = async k => ((await getBool(k, env)) ? "✅" : "❌");
-  const b = (t, k, v) => ({ text: `${t} ${v}`, callback_data: `config:toggle:${k}:${v === "❌"}` });
+  const s = async k => ((await getBool(k, env, true)) ? "✅" : "❌");
+  // 按钮同时是状态显示和切换入口：附"接收/拦截"文字，避免裸符号方向歧义
+  const b = (t, k, v) => ({ text: `${t} ${v} ${v === "✅" ? "接收" : "拦截"}`, callback_data: `config:toggle:${k}:${v === "❌"}` });
 
   const keys = [
     "enable_forward_forwarding",
@@ -1673,9 +1788,19 @@ async function getFilterKB(env) {
   };
 }
 
+// 列表页标题：说明这个列表是干什么的，并在为空时明确提示
+async function listTitle(type, env) {
+  const meta = LIST_META[type];
+  if (!meta) return `列表: ${type}`;
+  const k = type === "ar" ? "keyword_responses" : type === "kw" ? "block_keywords" : "authorized_admins";
+  const l = await getJsonCfg(k, env, true);
+  const n = Array.isArray(l) ? l.length : 0;
+  return `${meta.title}\n${meta.desc}\n\n` + (n ? `当前共 ${n} 条，点击可删除：` : meta.empty);
+}
+
 async function getListKB(type, env) {
   const k = type === "ar" ? "keyword_responses" : type === "kw" ? "block_keywords" : "authorized_admins";
-  const l = await getJsonCfg(k, env);
+  const l = await getJsonCfg(k, env, true);
   const btns = (Array.isArray(l) ? l : []).map(i => [{ text: `🗑 ${type === "ar" ? i.keywords : i}`, callback_data: `config:del:${type}:${i.id || i}` }]);
   btns.push([{ text: "➕ 添加", callback_data: `config:add:${type}` }], [{ text: "🔙 返回", callback_data: "config:menu" }]);
   return { inline_keyboard: btns };
@@ -1711,7 +1836,8 @@ async function handleAdminInput(id, msg, state, env) {
     } else if (k.endsWith("_add")) {
       k = k.replace("_add", "");
       const realK = k === "ar" ? "keyword_responses" : k === "kw" ? "block_keywords" : "authorized_admins";
-      const list = await getJsonCfg(realK, env);
+      // 同 del 分支：读—改—写必须基于 D1 真实值
+      const list = await getJsonCfg(realK, env, true);
       const arr = Array.isArray(list) ? list : [];
       if (k === "ar") {
         const [kk, rr] = txt.split("===");
