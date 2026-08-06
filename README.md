@@ -1,162 +1,219 @@
-# 🚀 Telegram 双向机器人 Cloudflare Worker
+# 🤖 Telegram 双向联系机器人 · Cloudflare Worker + D1
 
-[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-FFC425?logo=cloudflare)](https://workers.cloudflare.com/)
-[![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot_API-3AB3E0?logo=telegram)](https://core.telegram.org/bots/api)
-[![D1 Database](https://img.shields.io/badge/D1-Database-FFC425?logo=cloudflare)](https://developers.cloudflare.com/d1)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![D1 Database](https://img.shields.io/badge/D1-Database-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/d1)
+[![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot_API-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 
-> **企业级私聊托管与风控解决方案** - 通过 Cloudflare Worker + D1 数据库构建的高性能 Telegram 双向机器人，支持三模态验证、可视化协管系统和智能 CRM 管理
-
-## ✨ 项目简介
-
-这是一个基于 **Cloudflare Worker** 和 **D1 数据库** 构建的高性能 Telegram 双向机器人。  
-**Telegram 双向机器人 Cloudflare Worker 混合验证版** 带来了质的飞跃：完美继承私聊消息转发到群组话题的 CRM 核心能力，更引入 **三模态混合验证系统**（Cloudflare/Google/关闭）与 **独立问题验证** 机制，配合全新可视化协管管理，为您提供企业级私聊托管与风控解决方案。
+> 用户私聊机器人，消息自动转发到管理群的**专属话题**；管理员在话题里直接回复即可对话。内置人机验证、问答题库、关键词风控。
+> 单文件部署 —— 复制 `worker.js` 粘贴到 Cloudflare 即可，无需命令行工具。
 
 ---
 
-## 🔥 版本特性
+## ✨ 核心功能
 
-| 特性 | 说明 |
+| 功能 | 说明 |
 |------|------|
-| 🛡️ **混合验证架构** | 首创验证模式热切换，支持 Cloudflare Turnstile、Google Recaptcha 及关闭模式一键轮询，应对不同网络环境 |
-| 🧩 **模块化风控** | “人机验证（Captcha）”与“问题验证（Q&A）”逻辑解耦，可双重开启加强防护，或仅开启问答降低门槛 |
-| 👮 **可视化协管** | 重构协管管理逻辑，列表直接显示管理员 ID，支持精准删除与添加，权限管理更透明 |
-| ⚡ **CRM 增强** | 支持通过回复 `/clear` 快速撤销用户备注，管理更灵活 |
-| 🧠 **智能维护** | 保留数据库自动初始化、单人单卡聚合、双向状态同步等经典特性 |
+| 🗂️ **一人一话题** | 每个联系用户在管理群自动获得独立话题，话题即用户身份；管理员在话题内回复，机器人转达给用户 |
+| 🛡️ **人机验证** | Cloudflare Turnstile / Google reCAPTCHA 双模态，面板一键轮换，也可完全关闭 |
+| ❓ **问答题库** | 多题随机抽取，答错自动换题；判定只认用户抽中的那道题，背单题答案无法通吃 |
+| 🚫 **关键词风控** | 命中屏蔽词拦截并计违规，累计达阈值自动封禁；支持子串与正则两种匹配 |
+| 🤖 **自动回复** | 命中关键词自动回复用户，消息仍正常转发给管理员 |
+| 🛠 **转发过滤** | 转发/媒体/语音/贴纸/链接/频道/文本 7 类开关，逐类控制是否接收 |
+| 🪪 **资料卡与备注** | 话题顶部置顶用户资料卡，含屏蔽按钮；`/note` 为用户打标签 |
+| ⛔ **黑名单** | 屏蔽用户在黑名单话题生成卡片，两处状态双向同步，一键解封 |
+| 🌙 **营业状态** | 休息模式下自动回复忙碌提示（带冷却，不打扰） |
+| ⚙️ **可视化面板** | 私聊 `/start` 打开内联按钮面板，所有配置热更新，无需重新部署 |
 
 ---
 
-## 🧰 核心功能详解
+## 🚀 部署教程
 
-### 1. 🛡️ 多维安全验证系统（核心升级）
-- **三模态一键切换**：在控制面板中随时切换 Cloudflare/Google Recaptcha/关闭验证模式，无需重新部署
-- **独立问答验证**：即使关闭人机验证码，也能单独开启“数学题”或“自定义问答”拦截基础脚本攻击
-- **组合防御**：支持“验证码 + 问答”双重验证，只有全部通过后用户才能发送消息
+### 准备工作
 
-### 2. 👮 协管权限系统（优化）
-- **权限下放**：主管理员可添加多名协管员，拥有回复消息、查看面板、管理黑名单权限
-- **可视化管理**：在协管面板直观展示所有协管的 Telegram ID，点击 ID 一键删除，告别盲猜
+1. [Cloudflare 账号](https://dash.cloudflare.com/)（免费版即可）
+2. Bot Token —— 找 [@BotFather](https://t.me/BotFather) 创建机器人获取
+3. 管理群 —— 必须是**开启了话题功能的超级群组**，把机器人拉进群并给**管理员权限**（需要「管理话题」权限）
+4. 群组 ID 与你的用户 ID —— 找 [@raw_data_bot](https://t.me/raw_data_bot) 获取（群组 ID 以 `-100` 开头）
 
-### 3. 📨 双向消息中继
-- **自动话题**：每个用户的私聊消息自动在管理员群组创建独立话题（Topic）
-- **无感回复**：管理员在话题内直接回复，机器人自动转发给用户；用户回复自动转入对应话题
-
-### 4. 📇 CRM 客户管理系统
-- **智能备注**：管理员点击资料卡 ✏️ 按钮为用户打标签
-- **新特性**：备注模式下回复 `/clear` 可直接删除当前备注
-- **全局同步**：修改备注后，该用户所有历史资料卡（话题顶部、通知消息）自动同步更新
-- **资料卡追踪**：话题顶部始终置顶最新用户资料卡（含 ID、用户名、注册时间及备注）
-
-### 5. 📥 聚合收件箱 (One Card Policy)
-- **防刷屏机制**：无论用户发送多少消息，“🔔 未读消息”话题中每个用户只保留一张最新通知卡片
-- **阅后即焚**：点击 ✅ 已阅/删除，卡片即刻消失并重置通知冷却时间
-- **一键直达**：通知卡片包含跳转按钮，点击直达用户专属聊天话题
-
-### 6. 🚫 黑名单隔离系统
-- **双向同步**：手动屏蔽或触发关键词自动封禁后，在“🚫 黑名单”话题生成卡片
-- **一键解封**：在个人话题或黑名单话题点击解封，状态双向同步，黑名单卡片自动销毁
-- **自助重置**：被封禁用户发送 `/start` 可触发重置流程，重新进行验证
-
-### 7. 🌙 营业状态管理
-- **一键切换**：在面板中切换“营业中”或“休息中”
-- **自动回复**：休息模式下用户发消息收到预设忙碌提示（内置防抖机制避免重复打扰）
-
----
-
-## 🛠️ 部署指南（保姆级教程）
-
-> **📺 视频教程**：[点击访问部署视频教程](https://t.me/yinhai_notify/371?comment=136740)
-
-### 📋 准备工作
-1. [Cloudflare 账号](https://dash.cloudflare.com/)
-2. Telegram Bot Token（通过 [@BotFather](https://t.me/BotFather) 获取）
-3. Telegram 管理员群组 ID（必须是**开启话题功能的超级群组**，ID 以 `-100` 开头，通过 [@raw_data_bot](https://t.me/raw_data_bot) 获取）
-4. 管理员 ID（你自己的 TG ID，通过 [@raw_data_bot](https://t.me/raw_data_bot) 获取）
-
-> 💡 **升级超级群组技巧**（不公开群组方法）：
-> 1. 将群组的 **新成员是否可见消息记录** 设置为 **可见**
-> 2. 在 **管理员权限** 中细分权限，关闭 bot 用不上的权限
+> 💡 **普通群升级为超级群**：群设置里开启「话题」功能即可自动升级。
 
 ---
 
 ### 步骤一：创建 D1 数据库
-1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 导航至 **存储和数据库 → D1 数据库**
-3. 点击 **创建数据库**，命名为 `tg-bot-db`（或自定义名称）
-4. **无需**进行其他操作（代码会自动建表）
 
-### 步骤二：创建 Worker
-1. 进入 **Workers 和 Pages → 创建 Worker**
-2. 命名 Worker（例如 `tg-contact-bot`）→ 点击 **部署**
-3. 点击 **编辑代码**
-4. **全量覆盖**：删除所有默认代码，将 [`worker.js`](https://github.com/your-repo/telegram-cf-worker/blob/main/worker.js) 的完整代码粘贴进去
-5. **点击部署**，进行下一步配置
+1. Cloudflare 控制台 → **存储和数据库** → **D1**
+2. 点击**创建数据库**，名称随意（如 `tg-bot-db`）
+3. 建完即可，**无需手动建表**——机器人首次运行会自动创建
 
-### 步骤三：绑定 D1 数据库
-1. 在代码编辑页面左侧/上方找到 **设置 (Settings) 或 绑定 (Bindings)**
-2. 添加 D1 数据库绑定：
-   - **变量名称 (Variable Name)**：`TG_BOT_DB`（必须严格匹配大小写）
-   - **数据库**：选择步骤一创建的数据库
-3. 保存设置
+> ⚠️ 本版本使用全新表结构，**请新建一个数据库**，不要复用旧版本的库。
 
-### 步骤四：配置 Turnstile 验证
-1. 在 Cloudflare 侧边栏选择 **Turnstile → 添加站点**
-2. 填写配置：
-   - **站点名称**：任意（如 `tg-bot-verification`）
-   - **域**：填写 Worker 域名（例如 `your-worker.your-subdomain.workers.dev` 或 `workers.dev`）
-   - **模式**：选择 **托管 (Managed)**
-3. 创建后复制 **站点密钥 (Site Key)** 和 **密钥 (Secret Key)** 备用
+---
+
+### 步骤二：创建 Worker 并粘贴代码
+
+1. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → **从 Hello World 开始**
+2. 命名（如 `tg-contact-bot`）→ **部署**
+3. 点击**编辑代码**，删除编辑器里的全部默认代码
+4. 把本仓库 [`worker.js`](worker.js) 的完整内容粘贴进去 → **部署**
+
+---
+
+### 步骤三：绑定数据库
+
+Worker 页面 → **设置** → **绑定** → **添加绑定** → **D1 数据库**：
+
+| 项目 | 值 |
+|------|-----|
+| 变量名称 | `TG_BOT_DB` （**必须完全一致，区分大小写**） |
+| D1 数据库 | 选择步骤一创建的数据库 |
+
+---
+
+### 步骤四：配置验证码（可选但推荐）
+
+**Cloudflare Turnstile**（推荐，与 Worker 同一平台）：
+1. 控制台侧边栏 → **Turnstile** → **添加站点**
+2. 域名填写 Worker 域名（形如 `你的worker.你的子域.workers.dev`）
+3. 模式选**托管 (Managed)**
+4. 记下**站点密钥**和**密钥**
+
+**Google reCAPTCHA**（备选，可在面板随时切换）：
+1. 打开 [reCAPTCHA 管理台](https://www.google.com/recaptcha/admin)
+2. 类型选 **reCAPTCHA v2 → "我不是机器人"复选框**
+3. 记下**站点密钥**和**密钥**
+
+> 两种都不配也能用——面板里把人机验证切到「关闭」，只留问答验证即可。
+
+---
 
 ### 步骤五：配置环境变量
-在 Worker 的 **设置 → 变量** 中，添加以下 **9 个必备变量**：
 
-| 变量名称 | 示例值 | 说明 |
-|----------|--------|------|
-| `BOT_TOKEN` | `12345:AAH...` | 你的 Bot Token |
-| `ADMIN_IDS` | `123456,789012` | 管理员ID（多人用英文逗号分隔，**无空格**） |
-| `ADMIN_GROUP_ID` | `-100123456789` | 开启话题的超级群组 ID |
-| `WORKER_URL` | `https://xxx.workers.dev` | Worker 完整访问链接（**不带末尾斜杠**） |
-| `TURNSTILE_SITE_KEY` | `0x4AAAA...` | 步骤四获取的 Turnstile 站点密钥 |
-| `TURNSTILE_SECRET_KEY` | `0x4AAAA...` | 步骤四获取的 Turnstile 密钥 |
-| `RECAPTCHA_SITE_KEY` | `6LAAAAABBCCDDBGHYDD_cDmgjUtEbpF` | [Google reCAPTCHA v2](https://www.google.com/recaptcha/admin) 站点密钥 |
-| `RECAPTCHA_SECRET_KEY` | `6LAAAAABDDCCFGTTH-AIMK6z-H4aE` | [Google reCAPTCHA v2](https://www.google.com/recaptcha/admin) 密钥 |
-| `TELEGRAM_WEBHOOK_SECRET` | `mRD0p7...` | 生成随机字符即可 |
+Worker 页面 → **设置** → **变量和机密** → 逐条添加：
 
-> ⚠️ **重要**：  
-> - Google reCAPTCHA 需自行在 [Google reCAPTCHA Admin Console](https://www.google.com/recaptcha/admin) 创建（选择 **v2 Checkbox** 类型）
-> - 所有变量值**不要包含空格或引号**
-> - 点击 **部署 (Deploy)** 使代码和配置生效
+| 变量名 | 示例 | 说明 |
+|--------|------|------|
+| `BOT_TOKEN` | `123456:AAH...` | BotFather 给的 Token |
+| `ADMIN_IDS` | `123456789,987654321` | 管理员 ID，多人用英文逗号分隔（**不要有空格**） |
+| `ADMIN_GROUP_ID` | `-1001234567890` | 管理群 ID（以 `-100` 开头） |
+| `WORKER_URL` | `https://xxx.workers.dev` | Worker 完整地址（**结尾不要斜杠**） |
+| `TELEGRAM_WEBHOOK_SECRET` | `Ab3xK9...` | 自己随便编一串随机字符（字母数字，20 位以上） |
+| `TURNSTILE_SITE_KEY` | `0x4AAAA...` | Turnstile 站点密钥 |
+| `TURNSTILE_SECRET_KEY` | `0x4AAAA...` | Turnstile 密钥 |
+| `RECAPTCHA_SITE_KEY` | `6Lc...` | reCAPTCHA 站点密钥 |
+| `RECAPTCHA_SECRET_KEY` | `6Lc...` | reCAPTCHA 密钥 |
 
-### 步骤六：设置 Webhook
-在浏览器地址栏输入以下 URL 并回车（替换 `<你的BOT_TOKEN>` 和 `<你的WORKER_URL>` 和 `<你的TELEGRAM_WEBHOOK_SECRET>`）：
-```bash
+> 🔐 涉及密钥的变量建议点「加密」存为 Secret。填完记得**部署**使其生效。
+
+---
+
+### 步骤六：添加定时清理任务
+
+Worker 页面 → **设置** → **触发器** → **Cron 触发器** → **添加**：
+
+```
+0 * * * *
+```
+
+（表示每小时执行一次，用于清理过期的去重记录与限流计数）
+
+> ⚠️ 不配也能正常收发消息，但两张辅助表会持续增长，建议配上。
+
+---
+
+### 步骤七：设置 Webhook
+
+浏览器打开下面这个地址（替换成你自己的值），看到 `"ok":true` 即成功：
+
+```
 https://api.telegram.org/bot<你的BOT_TOKEN>/setWebhook?url=<你的WORKER_URL>/&secret_token=<你的TELEGRAM_WEBHOOK_SECRET>
 ```
-✅ **成功响应**：
+
+成功响应：
 ```json
 {"ok":true,"result":true,"description":"Webhook was set"}
 ```
 
+**完成！** 私聊机器人发送 `/start`：管理员会看到控制面板，普通用户会进入验证流程。
+
 ---
 
-## ❓ 常见问题解答
+## 🎛️ 管理面板一览
 
-| 问题现象 | 可能原因 | 解决方案 |
-|----------|----------|----------|
-| `[说明1] 系统忙，请稍后再试` | 1. 机器人未获得足够权限<br>2. 群组ID错误<br>3. 群组未升级为超级群组<br>4. 未开启话题功能 | 1. 检查群组是否为超级群组<br>2. 确认群组设置中 **开启话题**<br>3. 通过 [@raw_data_bot](https://t.me/raw_data_bot) 检查群组状态 |
-| `[说明2] 私聊BOT/start无反应` | `BOT_TOKEN` 配置错误 | 1. 重新从 @BotFather 获取 Token<br>2. 检查环境变量是否有拼写错误<br>3. 重新设置 webhook |
-| `[说明3] 回复消息无反应` | `ADMIN_IDS` 配置错误 | 1. 通过 [@raw_data_bot](https://t.me/raw_data_bot) 确认你的 TG ID<br>2. 检查环境变量中 ID 是否正确且无空格 |
-| `[说明4] 点击配置菜单出现ERROR` | D1 数据库未绑定或变量名错误 | 1. 检查绑定变量名是否为 `TG_BOT_DB`（大小写敏感）<br>2. 确认数据库已正确创建 |
-| `[说明5] 点击配置菜单无反应` | D1 数据库配置错误 | 1. 重新绑定数据库<br>2. 检查 Worker 代码是否包含最新 D1 初始化逻辑 |
+私聊机器人发送 `/start` 打开：
+
+```
+⚙️ 控制面板
+├── 🛡️ 验证设置
+│   ├── 人机验证：Cloudflare → Google → 关闭（点击轮换）
+│   ├── 问答验证：开 / 关
+│   └── ❓ 问答题库 —— 添加（问题===答案）、逐条删除
+├── 💬 欢迎语 —— 支持文字或图片/视频/GIF，{name} 自动替换为用户昵称
+├── 🚫 屏蔽词 —— 添加/删除，可设自动封禁阈值
+├── 🤖 自动回复 —— 添加（关键词===回复内容）、删除
+├── 🛠 转发设置 —— 7 类消息开关，点击切换 接收 / 拦截
+├── 🌙 营业状态 —— 营业 / 休息切换，忙碌回复语
+└── 🔧 维护 —— 重置黑名单话题
+```
+
+**管理群内操作**：
+
+| 操作 | 说明 |
+|------|------|
+| 在用户话题内发消息 | 自动转达给该用户 |
+| `/note 重要客户` | 给用户加备注（显示在资料卡上） |
+| `/note` | 清除备注 |
+| 资料卡「🚫 屏蔽 / ✅ 解封」按钮 | 切换屏蔽状态，与黑名单话题同步 |
+
+**私聊命令**（管理员）：
+
+| 命令 | 说明 |
+|------|------|
+| `/start` | 打开控制面板 |
+| `/reset 用户ID` | 强制该用户重新验证 |
+| `/help` | 帮助 |
+
+---
+
+## 💡 使用说明
+
+**关键词匹配规则**（屏蔽词与自动回复通用）：
+
+| 写法 | 效果 |
+|------|------|
+| `广告` | 子串匹配，不区分大小写，消息含「广告」即命中 |
+| `re:加微信\d+` | `re:` 前缀表示正则，匹配「加微信」后跟数字 |
+
+**问答题库工作方式**：用户验证时从题库**随机抽一题**，答错自动换一题。判定只认他被抽中的那道题——答其他题的答案算错。题库为空时问答环节自动跳过。
+
+**话题误删/误关怎么办**：不用管。话题被删除后，该用户下次发消息会自动新建话题；话题被关闭时机器人会自动重新打开。实在异常可到面板「🔧 维护」重置。
+
+---
+
+## ❓ 常见问题
+
+| 现象 | 原因与解决 |
+|------|-----------|
+| 用户发消息，群里没反应 | ① 机器人是否为群管理员且有「管理话题」权限 ② 群是否开启了话题功能 ③ `ADMIN_GROUP_ID` 是否正确（以 `-100` 开头） |
+| 私聊 `/start` 无反应 | `BOT_TOKEN` 有误，或 Webhook 未设置成功（重新执行步骤七，注意 `secret_token` 要与环境变量一致） |
+| 点面板按钮报错 / 无反应 | D1 未绑定或变量名不是 `TG_BOT_DB`（区分大小写），重新检查步骤三 |
+| 我是管理员却收到了验证 | `ADMIN_IDS` 里的 ID 不对，或含有空格。用 [@raw_data_bot](https://t.me/raw_data_bot) 确认自己的数字 ID |
+| 验证按钮点开是空白页 | `WORKER_URL` 填错（要完整 https 地址、结尾无斜杠），或 Turnstile 域名与 Worker 域名不匹配 |
+| 消息偶尔延迟几秒才到群里 | 正常现象。多条消息同时到达且话题尚未建好时，机器人会让 Telegram 稍后重投，避免建出重复话题 |
+
+---
+
+## 🔄 从旧版本升级
+
+本版本是**全新重写**，数据表结构与旧版不兼容：
+
+1. **新建**一个 D1 数据库（不要复用旧库，旧库保持原样即可）
+2. 按上面步骤部署新代码
+3. 已有用户需要**重新验证**，之前的话题不再关联（可手动删除或留作存档）
+
+**回滚**：把旧版本的 `.js` 文件重新粘贴回 Worker 并部署即可，旧数据库自始至终未被改动。
 
 ---
 
 ## 📜 许可证
-本项目采用 [MIT 许可证](LICENSE) - 详情请参阅 LICENSE 文件
 
----
-
-> **💡 提示**：部署完成后，向机器人发送 `/start` 即可体验完整功能！  
-> 遇到问题？请在 [Issues](https://github.com/huliyoudiangou/TG_Chat_Bot-D1/issues) 提交详细日志，我们将快速响应！  
-
-**🌟 给项目一个 Star 吧！您的支持是我们持续更新的动力！**  
-[![GitHub stars](https://img.shields.io/github/stars/your-repo/telegram-cf-worker?style=social)](https://github.com/huliyoudiangou/TG_Chat_Bot-D1)
+[MIT](LICENSE)
